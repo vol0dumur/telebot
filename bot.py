@@ -7,12 +7,6 @@ from datetime import datetime
 from telethon import TelegramClient, events
 from secret import api_id, api_hash
 
-# Server closed the connection: [WinError 121] The semaphore timeout period has expired
-# await client.pin_message(chat, message, notify=False)
-
-# quick replace
-# "🚨": "🔴🔴🔴",
-# "🟢": "🟢🟢🟢"
 
 client = TelegramClient("user_session", api_id, api_hash)
 client.parse_mode = "html"
@@ -395,3 +389,12 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+# == notes ==
+# Server closed the connection: [WinError 121] The semaphore timeout period has expired
+# await client.pin_message(chat, message, notify=False)
+
+# quick replace
+# "🚨": "🔴🔴🔴",
+# "🟢": "🟢🟢🟢"
