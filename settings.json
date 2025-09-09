@@ -1,0 +1,23 @@
+{
+    "alarm_start_keyword": "тривога",
+    "alarm_end_keyword": "відбій",
+    "message_ttl": 420,
+    "max_message_rows": 4,
+    "continue_symbols": [
+        " ",
+        "-",
+        "Б",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "Г",
+        "~"
+    ],
+    "target_channel_id": -1002780261518
+}
