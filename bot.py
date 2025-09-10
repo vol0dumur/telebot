@@ -63,9 +63,9 @@ def correct_punctuation(raw_str: str) -> str:
         str: Виправлений текст у нижньому регістрі.
     """
     if raw_str:
-        raw_str = raw_str.strip().replace(" ,", ",")
-        raw_str = raw_str.replace(",", ", ")
-        raw_str = re.sub(r'\s+', ' ', raw_str)
+        raw_str = re.sub(r"([.!?,;])", r"\1 ", raw_str)
+        raw_str = re.sub(r"\s+([.!?,;])", r"\1", raw_str)
+        raw_str = re.sub(r"\s+", " ", raw_str)
 
     return raw_str.lower()
 
@@ -105,7 +105,7 @@ def trunc_message(raw_str: str, trunc_word: str, continue_symbols: set) -> str:
 
 def replace_whole_words(text: str, translate_dict: dict) -> str:
     """
-    Перекладає повідомлення, використовуючи словник.
+    Перекладає повідомлення на українську, використовуючи словник.
     
     Args:
         text (str): Вхідний текст для обробки.
@@ -192,18 +192,35 @@ async def send_messages(messages_to_send: list) -> None:
 
         target_channel_id = message.get("target_channel_id", TARGET_CHANNEL_ID)
         file = message.get("file", None)
-        message_text = message.get("message_text", "_Помилка надсилання повідомлення_")
+        message_text = message.get("message_text", "<i>Помилка надсилання повідомлення</i>")
         silent = message.get("silent", False)
 
         try:
             if file:
-                print("[INFO] Зараз будемо надсилати повідомлення з картинкою.")
                 await client.send_file(target_channel_id, file=file, caption=message_text, silent=silent)
             else:
-                print(f"[INFO] Зараз будемо надсилати просте повідомлення:\n{message_text}")
                 await client.send_message(target_channel_id, message_text, silent=silent)
         except Exception as e:
             print(f"[ERROR] Помилка відправки: {e}")
+
+
+def process_text(message_text: str, config: dict) -> str:
+    
+    if config.get("iscorrectpunctuation", False): # Корекція пунктуації
+        message_text = correct_punctuation(message_text)
+
+    if config.get("istranslate", False): # Спеціальна обробка і переклад тексту
+        message_text = replace_whole_words(message_text, TRANSLATION_DICT).capitalize()
+    
+    if config.get("isdeletewords", False): # Видалення слів з переліку
+        for delete_word in config.get("deletewords", []):
+            message_text = message_text.replace(delete_word, "")
+        message_text = message_text.strip()
+
+    if config.get("istruncmessage", False) and len(message_text.split("\n")) > MAX_MESSAGE_ROWS: # Обрізання зайвої інформації
+        message_text = trunc_message(message_text, config.get("truncword", ""), CONTINUE_SYMBOLS)
+
+    return message_text
 
 
 def exception_handler(func):
@@ -229,7 +246,6 @@ async def handler(event):
 
     message_text = event.raw_text
     channel_id = event.chat_id
-    messages_to_send = []
 
     config = CHANNELS.get(channel_id, {})
     keywords = config.get("keywords", [])
@@ -239,24 +255,25 @@ async def handler(event):
     is_filter_stopwords = config.get("isfilterstopwords", False) 
     stop_length = config.get("stoplength", 0)
     stopwords = config.get("stopwords", [])
-    deletewords = config.get("deletewords", [])
+    # deletewords = config.get("deletewords", [])
     is_silent = config.get("issilent", False)
     is_save_for_alarm = config.get("issaveforalarm", False)
     is_forward_images = config.get("isforwardimages", False)
     is_trunc_message = config.get("istruncmessage", False)
-    is_correct_punctuation = config.get("iscorrectpunctuation", False)
     is_alarm_source = config.get("isalarmsource", False)
-    is_translate = config.get("istranslate", False)
-    is_delete_words = config.get("isdeletewords", False)
+    # is_correct_punctuation = config.get("iscorrectpunctuation", False)
+    # is_translate = config.get("istranslate", False)
+    # is_delete_words = config.get("isdeletewords", False)
 
     state = client.state
     now = datetime.now()
     other_reasons = ""
+    messages_to_send = []
+    is_save_right_now = False
 
     print(f"\n[INFO] [{now.strftime('%H:%M:%S')}] Повідомлення з '{name}':\n{message_text or "[EMPTY]"}\n")
 
     if not message_text and not is_forward_images:
-        print("[INFO] Повідомлення пусте і не треба пересилати картинку - не обробляємо далі!")
         return
     
     if is_save_for_alarm and not state["is_alarm"]: # Спеціальна обробка каналів-джерел інформації про тривогу
@@ -264,13 +281,6 @@ async def handler(event):
             message_text = trunc_message(message_text, trunc_word, CONTINUE_SYMBOLS)
         message_stack.append([now, message_text]) # Зберігаємо текст і час
         print(f"[INFO] Це повідомлення збережене у стек для наступної тривоги.")
-    # tmp
-    else:
-        if not is_save_for_alarm:
-            print("[INFO] Повідомлення з цього каналу у стек не зберігаються.")
-        else:
-            print("[INFO] Зараз тривога, тому повідомлення у стек не зберігаються.")
-    # tmp end
 
     if state["is_show_next_event"]: # Якщо треба обов'язково показати наступне повідомлення
         state["is_show_next_event"] = False
@@ -287,20 +297,23 @@ async def handler(event):
                     print(f"[INFO] Знайдено ключове слово '{keyword}', але повідомлення відфільтроване.")
                     break
 
-            # Блок обробки тексту. винести у функцію
-            if is_correct_punctuation: # Корекція пунктуації
-                message_text = correct_punctuation(message_text)
+            # Обробка тексту
+            message_text = process_text(message_text, config)
 
-            if is_translate: # Спеціальна обробка і переклад тексту
-                message_text = replace_whole_words(message_text, TRANSLATION_DICT).capitalize()
+            # Блок обробки тексту. Винести у функцію
+            # if is_correct_punctuation: # Корекція пунктуації
+            #     message_text = correct_punctuation(message_text)
+
+            # if is_translate: # Спеціальна обробка і переклад тексту
+            #     message_text = replace_whole_words(message_text, TRANSLATION_DICT).capitalize()
             
-            if is_delete_words: # Видалення слів з переліку
-                for delete_word in deletewords:
-                    message_text = message_text.replace(delete_word, "")
-                message_text = message_text.strip()
+            # if is_delete_words: # Видалення слів з переліку
+            #     for delete_word in deletewords:
+            #         message_text = message_text.replace(delete_word, "")
+            #     message_text = message_text.strip()
 
-            if is_trunc_message and len(message_text.split("\n")) > MAX_MESSAGE_ROWS: # Обрізання зайвої інформації
-                message_text = trunc_message(message_text, trunc_word, CONTINUE_SYMBOLS)
+            # if is_trunc_message and len(message_text.split("\n")) > MAX_MESSAGE_ROWS: # Обрізання зайвої інформації
+            #     message_text = trunc_message(message_text, trunc_word, CONTINUE_SYMBOLS)
             # Кінець блоку обробки тексту
 
             additional_message = ""
@@ -316,7 +329,7 @@ async def handler(event):
                     if reason:
                         additional_message = f"\n<i>Ймовірна причина тривоги:\n{reason}</i>"
                         # Винести наступний рядок у функцію?
-                        other_reasons = "\n".join(f"<blockquote>{other_reason}</blockquote>" for other_reason in [m[1] for m in message_stack if m[1] != reason and len(m[1].split("\n")) < 2 * MAX_MESSAGE_ROWS and (now - m[0]).total_seconds() <= 2 * MESSAGE_TTL])
+                        other_reasons = "\n \n".join(f"<blockquote>{other_reason}</blockquote>" for other_reason in [m[1] for m in message_stack if m[1] != reason and len(m[1].split("\n")) < 2 * MAX_MESSAGE_ROWS and (now - m[0]).total_seconds() <= 2 * MESSAGE_TTL])
                     else:
                         state["is_show_next_event"] = True
                         additional_message = f"\n<i>Ймовірна причина тривоги не визначена.\nОчікуйте на причину в наступному повідомленні.</i>"
@@ -327,7 +340,7 @@ async def handler(event):
                     additional_message = f"\n<i>Тривалість: {hours} г. {minutes} хв.</i>"
 
                 message_text = f"<b>{message_text}</b>"
-                message_count = 50 # Терміново зберігаємо стан
+                is_save_right_now = True # Терміново зберігаємо стан
             # Кінець блоку опрацювання тривоги і відбою
 
             # Додаємо мітку каналу-джерела
@@ -335,19 +348,18 @@ async def handler(event):
                 message_text += f"\n<i>({url})</i>"
                 state["current_channel"] = channel_id
             
+
             if not is_similar(message_text, state["last_message"]):
 
                 if is_forward_images and event.photo:
-                    print("[INFO] Є картинка! Спробуємо надіслати.")
                     messages_to_send.append({"file": event.photo, "message_text": f"{message_text}{additional_message}", "silent": is_silent})
                 else:
-                    print("[INFO] Звичайне повідомлення, тільки текст.")
                     messages_to_send.append({"message_text": f"{message_text}{additional_message}", "silent": is_silent})
                 print(f"[INFO] Знайдено ключове слово '{keyword}' — повідомлення надіслане.")
 
                 if other_reasons:
                     messages_to_send.append({"message_text": f"Інші можливі причини тривоги:\n{other_reasons}", "silent": True})
-                    print(f"[INFO] Інші причини:\n{other_reasons}")
+                    print(f"[INFO] Інші можливі причини тривоги:\n{other_reasons}")
                 
             else:
                 print(f"[INFO] Повідомлення пропущене: '{message_text}' схоже на '{state["last_message"]}'.")
@@ -355,13 +367,15 @@ async def handler(event):
             state["last_message"] = message_text # Зберігаємо текст останнього надісланого повідомлення для майбутньої перевірки
 
             message_count += 1
-            if message_count >= 30:
+            if message_count >= 30 or is_save_right_now:
                 # Блок збереження конфігу. Винести у функцію
                 state_copy = deepcopy(client.state)
                 state_copy["alarm_start_time"] = state_copy["alarm_start_time"].isoformat()
 
                 with open("state.json", "w", encoding="utf-8") as f:
                     json.dump(state_copy, f, indent=4)
+
+                is_save_right_now = False
                 # Кінець блоку збереження конфігу
                 message_count = 0
 
@@ -391,7 +405,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 
-# == notes ==
+# === notes ===
 # Server closed the connection: [WinError 121] The semaphore timeout period has expired
 # await client.pin_message(chat, message, notify=False)
 

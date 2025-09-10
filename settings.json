@@ -4,7 +4,7 @@
     "message_ttl": 420,
     "max_message_rows": 4,
     "continue_symbols": [
-        " ",
+        "◦",
         "-",
         "Б",
         "1",
