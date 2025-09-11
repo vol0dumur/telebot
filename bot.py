@@ -23,7 +23,15 @@ state_defaults = {
 
 try:
     with open("channels.json", "r", encoding="utf-8") as f:
-        CHANNELS = {int(k): v for k, v in json.load(f).items()}
+        # CHANNELS = {int(k): v for k, v in json.load(f).items()}
+        CHANNELS = {}
+        CHANNELS_FOR_ALARM = {}
+        for k, v in json.load(f).items():
+            if v["is_read_only_when_alarm"]:
+                CHANNELS_FOR_ALARM.update({k: v})
+            else:
+                CHANNELS.update({k: v})
+    print(f"[INFO] Завантажено налаштування {len(CHANNELS)} каналів для постійного відстеження і {len(CHANNELS_FOR_ALARM)} калалу/ів для відстеження під час тривоги.")
     with open("dict.json", "r", encoding="utf-8") as f:
         TRANSLATION_DICT = json.load(f)
     with open("state.json", "r", encoding="utf-8") as f:
@@ -205,20 +213,33 @@ async def send_messages(messages_to_send: list) -> None:
 
 
 def process_text(message_text: str, config: dict) -> str:
+    """
+    Редагує текст повідомлення відповідно до прапорців каналу.
     
+    Args:
+        message_text (str): Текст повідомлення.
+        config (dict): Словник з налаштуваннями каналу.
+    
+    Returns:
+        message_text (str): Текст повідомлення.
+    """
     if config.get("iscorrectpunctuation", False): # Корекція пунктуації
         message_text = correct_punctuation(message_text)
+        print("[INFO] Корекція пунктуації.")
 
     if config.get("istranslate", False): # Спеціальна обробка і переклад тексту
         message_text = replace_whole_words(message_text, TRANSLATION_DICT).capitalize()
+        print("[INFO] Спеціальна обробка і переклад тексту.")
     
-    if config.get("isdeletewords", False): # Видалення слів з переліку
+    if config.get("isdeletewords", False): # Видалення слів відповідно до переліку
         for delete_word in config.get("deletewords", []):
             message_text = message_text.replace(delete_word, "")
         message_text = message_text.strip()
+        print("[INFO] Видалення слів відповідно до переліку.")
 
     if config.get("istruncmessage", False) and len(message_text.split("\n")) > MAX_MESSAGE_ROWS: # Обрізання зайвої інформації
         message_text = trunc_message(message_text, config.get("truncword", ""), CONTINUE_SYMBOLS)
+        print("[INFO] Обрізання зайвої інформації.")
 
     return message_text
 
@@ -241,13 +262,14 @@ def exception_handler(func):
 @exception_handler
 async def handler(event):
 
-    global message_stack
-    global message_count
+    global message_stack    # Перенести у state
+    global message_count    # Перенести у state
 
     message_text = event.raw_text
     channel_id = event.chat_id
 
     config = CHANNELS.get(channel_id, {})
+    # is_read_only_when_alarm = config.get("is_read_only_when_alarm", False)
     keywords = config.get("keywords", [])
     trunc_word = config.get("truncword", "")
     name = config.get("name", "невідомий")
@@ -269,7 +291,7 @@ async def handler(event):
     now = datetime.now()
     other_reasons = ""
     messages_to_send = []
-    is_save_right_now = False
+    is_save_right_now = False   # Прапорець, який каже що треба зберегти стан прямо зараз
 
     print(f"\n[INFO] [{now.strftime('%H:%M:%S')}] Повідомлення з '{name}':\n{message_text or "[EMPTY]"}\n")
 
@@ -300,31 +322,18 @@ async def handler(event):
             # Обробка тексту
             message_text = process_text(message_text, config)
 
-            # Блок обробки тексту. Винести у функцію
-            # if is_correct_punctuation: # Корекція пунктуації
-            #     message_text = correct_punctuation(message_text)
-
-            # if is_translate: # Спеціальна обробка і переклад тексту
-            #     message_text = replace_whole_words(message_text, TRANSLATION_DICT).capitalize()
-            
-            # if is_delete_words: # Видалення слів з переліку
-            #     for delete_word in deletewords:
-            #         message_text = message_text.replace(delete_word, "")
-            #     message_text = message_text.strip()
-
-            # if is_trunc_message and len(message_text.split("\n")) > MAX_MESSAGE_ROWS: # Обрізання зайвої інформації
-            #     message_text = trunc_message(message_text, trunc_word, CONTINUE_SYMBOLS)
-            # Кінець блоку обробки тексту
-
             additional_message = ""
 
-            # Блок опрацювання тривоги і відбою. винести у функцію
+            # Блок опрацювання тривоги і відбою. Винести у функцію
             if is_alarm_source:
 
                 if keyword == ALARM_START_KEYWORD:
                     state["is_alarm"] = True
                     state["alarm_start_time"] = now
                     print(f"[INFO] Початок тривоги о {now.strftime('%H:%M:%S')}")
+                    CHANNELS = CHANNELS | CHANNELS_FOR_ALARM    # Додаємо ще канали для відстеження
+                    print(f"[INFO] Додано {len(CHANNELS_FOR_ALARM)} канал(ів) для відстеження під час тривоги.")
+
                     reason = select_reason(message_stack, now)
                     if reason:
                         additional_message = f"\n<i>Ймовірна причина тривоги:\n{reason}</i>"
@@ -338,9 +347,19 @@ async def handler(event):
                     state["is_alarm"] = False
                     hours, minutes = calculate_length_hm(now - state["alarm_start_time"])
                     additional_message = f"\n<i>Тривалість: {hours} г. {minutes} хв.</i>"
+                    for k, _ in CHANNELS_FOR_ALARM.items():
+                        # del CHANNELS[k]
+                        try:
+                            if k in CHANNELS:  # Перевіряємо, чи ключ існує
+                                del CHANNELS[k]     # Видалаяємо канали зі словника для відстеження
+                                print(f"[INFO] Успішно видалено канал: {k}")
+                            else:
+                                print(f"[ERROR] Ключ {k} не знайдено в CHANNELS")
+                        except Exception as e:
+                            print(f"[ERROR] Помилка при видаленні ключа {k}: {e}")
 
                 message_text = f"<b>{message_text}</b>"
-                is_save_right_now = True # Терміново зберігаємо стан
+                is_save_right_now = True # Терміново зберігаємо стан, якщо ключове слово з каналу-джерела тривоги
             # Кінець блоку опрацювання тривоги і відбою
 
             # Додаємо мітку каналу-джерела
