@@ -8,6 +8,11 @@ from telethon import TelegramClient, events
 from secret import api_id, api_hash
 
 
+CHANNELS_JSON = "channels.json"
+STATE_JSON = "state.json"
+DICT_JSON = "dict.json"
+SETTINGS_JSON = "settings.json"
+
 client = TelegramClient("user_session", api_id, api_hash)
 client.parse_mode = "html"
 message_stack = deque(maxlen=4) # Стек для причин тривоги
@@ -22,21 +27,13 @@ state_defaults = {
 }
 
 try:
-    with open("channels.json", "r", encoding="utf-8") as f:
-        # CHANNELS = {int(k): v for k, v in json.load(f).items()}
-        CHANNELS = {}
-        CHANNELS_FOR_ALARM = {}
-        for k, v in json.load(f).items():
-            if v["is_read_only_when_alarm"]:
-                CHANNELS_FOR_ALARM.update({k: v})
-            else:
-                CHANNELS.update({k: v})
-    print(f"[INFO] Завантажено налаштування {len(CHANNELS)} каналів для постійного відстеження і {len(CHANNELS_FOR_ALARM)} калалу/ів для відстеження під час тривоги.")
-    with open("dict.json", "r", encoding="utf-8") as f:
+    with open(CHANNELS_JSON, "r", encoding="utf-8") as f:
+        CHANNELS = {int(k): v for k, v in json.load(f).items()}
+    with open(DICT_JSON, "r", encoding="utf-8") as f:
         TRANSLATION_DICT = json.load(f)
-    with open("state.json", "r", encoding="utf-8") as f:
+    with open(STATE_JSON, "r", encoding="utf-8") as f:
         client.state = json.load(f)
-    with open("settings.json", "r", encoding="utf-8") as f:
+    with open(SETTINGS_JSON, "r", encoding="utf-8") as f:
         general_settings = json.load(f)
 except FileNotFoundError:
     print("[ERROR] Файл не знайдено.")
@@ -46,7 +43,8 @@ except json.JSONDecodeError:
     raise
 
 client.state = {**state_defaults, **client.state}
-print(f"[INFO] client.state = {client.state}")
+# print(f"[DEBUG] client.state = {client.state}\n")
+# print(f"[DEBUG] Зараз у CHANNELS записів = {len(CHANNELS)}.\nВміст після ініціалізації:\n{CHANNELS}\n")
 
 for key in ("alarm_start_time",):
     if isinstance(client.state.get(key), str):
@@ -208,6 +206,7 @@ async def send_messages(messages_to_send: list) -> None:
                 await client.send_file(target_channel_id, file=file, caption=message_text, silent=silent)
             else:
                 await client.send_message(target_channel_id, message_text, silent=silent)
+            print(f"[DEBUG] Було надіслане повідомлення:\n>>> {message_text} <<<")
         except Exception as e:
             print(f"[ERROR] Помилка відправки: {e}")
 
@@ -244,6 +243,12 @@ def process_text(message_text: str, config: dict) -> str:
     return message_text
 
 
+def save_state(state_copy: dict) -> None:
+    state_copy["alarm_start_time"] = state_copy["alarm_start_time"].isoformat()
+    with open(STATE_JSON, "w", encoding="utf-8") as f:
+        json.dump(state_copy, f, indent=4)
+
+
 def exception_handler(func):
 
     async def wrapper(event):
@@ -269,7 +274,7 @@ async def handler(event):
     channel_id = event.chat_id
 
     config = CHANNELS.get(channel_id, {})
-    # is_read_only_when_alarm = config.get("is_read_only_when_alarm", False)
+
     keywords = config.get("keywords", [])
     trunc_word = config.get("truncword", "")
     name = config.get("name", "невідомий")
@@ -277,15 +282,11 @@ async def handler(event):
     is_filter_stopwords = config.get("isfilterstopwords", False) 
     stop_length = config.get("stoplength", 0)
     stopwords = config.get("stopwords", [])
-    # deletewords = config.get("deletewords", [])
     is_silent = config.get("issilent", False)
     is_save_for_alarm = config.get("issaveforalarm", False)
     is_forward_images = config.get("isforwardimages", False)
     is_trunc_message = config.get("istruncmessage", False)
     is_alarm_source = config.get("isalarmsource", False)
-    # is_correct_punctuation = config.get("iscorrectpunctuation", False)
-    # is_translate = config.get("istranslate", False)
-    # is_delete_words = config.get("isdeletewords", False)
 
     state = client.state
     now = datetime.now()
@@ -293,9 +294,12 @@ async def handler(event):
     messages_to_send = []
     is_save_right_now = False   # Прапорець, який каже що треба зберегти стан прямо зараз
 
-    print(f"\n[INFO] [{now.strftime('%H:%M:%S')}] Повідомлення з '{name}':\n{message_text or "[EMPTY]"}\n")
+    print(f"\n[DEBUG] [{now.strftime('%H:%M:%S')}] Повідомлення з '{name}':\n{message_text or "[EMPTY]"}\n")
 
     if not message_text and not is_forward_images:
+        return
+    if config.get("is_read_only_when_alarm", False) and not state["is_alarm"]:
+        print("[INFO] Пропущене повідомлення з каналу, який відстежується тільки під час тривоги.")
         return
     
     if is_save_for_alarm and not state["is_alarm"]: # Спеціальна обробка каналів-джерел інформації про тривогу
@@ -308,7 +312,8 @@ async def handler(event):
         state["is_show_next_event"] = False
         if is_trunc_message and trunc_word in message_text: # Якщо раптом повідомлення можна обрізати - то обрізаємо
             message_text = trunc_message(message_text, trunc_word, CONTINUE_SYMBOLS)
-        messages_to_send.append({"message_text": f"Ймовірна причина тривоги:\n{message_text}\n(<i>{url}</i>)", "silent": True})
+        messages_to_send.append({"message_text": f"<i>Ймовірна причина тривоги:</i>\n{message_text}\n(<i>{url}</i>)", "silent": True})
+        state["current_channel"] = channel_id
 
     for keyword in keywords:
 
@@ -316,7 +321,7 @@ async def handler(event):
 
             if is_filter_stopwords:
                 if len(message_text) > stop_length or any(stop_word in message_text for stop_word in stopwords):
-                    print(f"[INFO] Знайдено ключове слово '{keyword}', але повідомлення відфільтроване.")
+                    print(f"[DEBUG] Знайдено ключове слово '{keyword}', але повідомлення відфільтроване.")
                     break
 
             # Обробка тексту
@@ -330,14 +335,12 @@ async def handler(event):
                 if keyword == ALARM_START_KEYWORD:
                     state["is_alarm"] = True
                     state["alarm_start_time"] = now
-                    print(f"[INFO] Початок тривоги о {now.strftime('%H:%M:%S')}")
-                    CHANNELS = CHANNELS | CHANNELS_FOR_ALARM    # Додаємо ще канали для відстеження
-                    print(f"[INFO] Додано {len(CHANNELS_FOR_ALARM)} канал(ів) для відстеження під час тривоги.")
+                    print(f"[DEBUG] Початок тривоги о {now.strftime('%H:%M:%S')}")
 
                     reason = select_reason(message_stack, now)
                     if reason:
                         additional_message = f"\n<i>Ймовірна причина тривоги:\n{reason}</i>"
-                        # Винести наступний рядок у функцію?
+                        # Винести наступний рядок у функцію
                         other_reasons = "\n \n".join(f"<blockquote>{other_reason}</blockquote>" for other_reason in [m[1] for m in message_stack if m[1] != reason and len(m[1].split("\n")) < 2 * MAX_MESSAGE_ROWS and (now - m[0]).total_seconds() <= 2 * MESSAGE_TTL])
                     else:
                         state["is_show_next_event"] = True
@@ -347,16 +350,6 @@ async def handler(event):
                     state["is_alarm"] = False
                     hours, minutes = calculate_length_hm(now - state["alarm_start_time"])
                     additional_message = f"\n<i>Тривалість: {hours} г. {minutes} хв.</i>"
-                    for k, _ in CHANNELS_FOR_ALARM.items():
-                        # del CHANNELS[k]
-                        try:
-                            if k in CHANNELS:  # Перевіряємо, чи ключ існує
-                                del CHANNELS[k]     # Видалаяємо канали зі словника для відстеження
-                                print(f"[INFO] Успішно видалено канал: {k}")
-                            else:
-                                print(f"[ERROR] Ключ {k} не знайдено в CHANNELS")
-                        except Exception as e:
-                            print(f"[ERROR] Помилка при видаленні ключа {k}: {e}")
 
                 message_text = f"<b>{message_text}</b>"
                 is_save_right_now = True # Терміново зберігаємо стан, якщо ключове слово з каналу-джерела тривоги
@@ -374,28 +367,21 @@ async def handler(event):
                     messages_to_send.append({"file": event.photo, "message_text": f"{message_text}{additional_message}", "silent": is_silent})
                 else:
                     messages_to_send.append({"message_text": f"{message_text}{additional_message}", "silent": is_silent})
-                print(f"[INFO] Знайдено ключове слово '{keyword}' — повідомлення надіслане.")
+                print(f"[DEBUG] Знайдено ключове слово '{keyword}' — повідомлення надіслане.")
 
                 if other_reasons:
                     messages_to_send.append({"message_text": f"Інші можливі причини тривоги:\n{other_reasons}", "silent": True})
-                    print(f"[INFO] Інші можливі причини тривоги:\n{other_reasons}")
+                    print(f"[DEBUG] Інші можливі причини тривоги:\n{other_reasons}")
                 
             else:
-                print(f"[INFO] Повідомлення пропущене: '{message_text}' схоже на '{state["last_message"]}'.")
+                print(f"[DEBUG] Повідомлення пропущене: '{message_text}' схоже на '{state["last_message"]}'.")
 
             state["last_message"] = message_text # Зберігаємо текст останнього надісланого повідомлення для майбутньої перевірки
 
             message_count += 1
             if message_count >= 30 or is_save_right_now:
-                # Блок збереження конфігу. Винести у функцію
-                state_copy = deepcopy(client.state)
-                state_copy["alarm_start_time"] = state_copy["alarm_start_time"].isoformat()
-
-                with open("state.json", "w", encoding="utf-8") as f:
-                    json.dump(state_copy, f, indent=4)
-
+                save_state(deepcopy(client.state))
                 is_save_right_now = False
-                # Кінець блоку збереження конфігу
                 message_count = 0
 
             break # Зупиняє перебір ключових слів, якщо було хоч одне співпадіння
@@ -408,15 +394,7 @@ async def handler(event):
 
 async def main():
     await client.start()
-    print(f"[INFO] [{datetime.now().strftime('%H:%M:%S')}] Бот запущений.")
-
-    #   temporary
-    # messages_to_send_tmp = []
-    # m_text = "<blockquote>Тестування цитат.\nДругий рядок.</blockquote><b>Жирний текст!<b><i>Курсивний текст.</i>"
-    # messages_to_send_tmp.append({"message_text": m_text, "silent": True})
-    # await send_messages(messages_to_send_tmp)
-    #   temporary end
-
+    print(f"[DEBUG] [{datetime.now().strftime('%H:%M:%S')}] Бот запущений.")
     await client.run_until_disconnected()
 
 

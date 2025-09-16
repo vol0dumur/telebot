@@ -40,7 +40,7 @@
   "-1002432204405": {
     "name": "Кременчуцький Миколай",
     "url": "kremen_sv",
-    "keywords": ["білецьк", "малам", "чечел", "молодё", "молоде", "молоді", "бах", "мопед", "знам", "кременчук", "піщан", "балли", "бали", "отбо", "минус", "карид", "корид", "пеноп", "омель", "громко", "пуски", "искан", "ракет", "шахидов", "угроз", "спать", "шахід"],
+    "keywords": ["білецьк", "малам", "чечел", "молодё", "молоде", "молоді", "бах", "мопед", "знам", "кременчук", "піщан", "балли", "бали", "отбо", "минус", "мінус", "карид", "корид", "пеноп", "омель", "громко", "пуски", "искан", "ракет", "шахидов", "угроз", "спать", "шахід"],
     "truncword": "",
     "deletewords": ["4323345013202586", "5457082251147299", "хочеш дякуй", "хочеш ні", "пумб", "приват"],
     "is_read_only_when_alarm": false,
@@ -84,7 +84,7 @@
     "is_read_only_when_alarm": false,
     "isfilterstopwords": true,
     "stoplength": 350,
-    "stopwords": ["підпис", "долучай", "світловод", "горішні", "носій", "банку", "пішоход", "керуван"],
+    "stopwords": ["підпис", "долучай", "світловод", "горішні", "носій", "банк", "пішоход", "керуван", "фінанс"],
     "issilent": false,
     "issaveforalarm": false,
     "isforwardimages": false,
@@ -99,11 +99,11 @@
     "url": "h_kremenchug",
     "keywords": ["вибух", "ракет", "укрит", "бпла", "загроз", "електр", "шахед", "крилат", "стратег"],
     "truncword": "",
-    "deletewords": [],
+    "deletewords": ["Підписатися • Надіслати новину • TT • IG • X • FB"],
     "is_read_only_when_alarm": true,
     "isfilterstopwords": true,
     "stoplength": 350,
-    "stopwords": [],
+    "stopwords": ["оголошена"],
     "issilent": false,
     "issaveforalarm": false,
     "isforwardimages": false,
@@ -111,6 +111,6 @@
     "iscorrectpunctuation": false,
     "isalarmsource": false,
     "istranslate": false,
-    "isdeletewords": false
+    "isdeletewords": true
   }
 }
