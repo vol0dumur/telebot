@@ -1,6 +1,6 @@
 import asyncio
 import json
-import re
+import re # TODO from re import sub
 from copy import deepcopy
 from collections import deque
 from datetime import datetime
@@ -15,16 +15,6 @@ SETTINGS_JSON = "settings.json"
 
 client = TelegramClient("user_session", api_id, api_hash)
 client.parse_mode = "html"
-message_stack = deque(maxlen=4) # Стек для причин тривоги
-message_count = 0
-
-state_defaults = {
-    "is_alarm": False,
-    "is_show_next_event": False,
-    "current_channel": None,
-    "last_message": "",
-    "alarm_start_time": datetime.now()
-}
 
 try:
     with open(CHANNELS_JSON, "r", encoding="utf-8") as f:
@@ -42,13 +32,19 @@ except json.JSONDecodeError:
     print("[ERROR] Помилка формату json.")
     raise
 
-client.state = {**state_defaults, **client.state}
-# print(f"[DEBUG] client.state = {client.state}\n")
-# print(f"[DEBUG] Зараз у CHANNELS записів = {len(CHANNELS)}.\nВміст після ініціалізації:\n{CHANNELS}\n")
-
+# Блок відновлення типу змінних після читання з json
 for key in ("alarm_start_time",):
     if isinstance(client.state.get(key), str):
         client.state[key] = datetime.fromisoformat(client.state[key])
+
+for i in client.state["message_stack"]:
+    if isinstance(i[0], str):
+        i[0] = datetime.fromisoformat(i[0])
+client.state["message_stack"] = deque(client.state["message_stack"], maxlen=4)
+
+if isinstance(client.state["message_count"], str):
+    client.state["message_count"] = int(client.state["message_count"])
+# Кінець блоку відновлення типу змінних після читання з json
 
 MAX_MESSAGE_ROWS = general_settings["max_message_rows"]
 MESSAGE_TTL = general_settings["message_ttl"]
@@ -89,8 +85,10 @@ def trunc_message(raw_str: str, trunc_word: str, continue_symbols: set) -> str:
     Returns:
         str: Обрізаний текст, без завершальних пробілів.
     """
-    if not raw_str or not trunc_word:
+    if not raw_str:
         return ""
+    if not trunc_word or len(raw_str.split("\n")) <= MAX_MESSAGE_ROWS or trunc_word not in raw_str.lower():
+        return raw_str
     
     result_lines = []
     is_processing = False
@@ -109,7 +107,7 @@ def trunc_message(raw_str: str, trunc_word: str, continue_symbols: set) -> str:
     return "\n".join(result_lines).strip()
 
 
-def replace_whole_words(text: str, translate_dict: dict) -> str:
+def translate_text(text: str, translate_dict: dict) -> str:
     """
     Перекладає повідомлення на українську, використовуючи словник.
     
@@ -222,29 +220,63 @@ def process_text(message_text: str, config: dict) -> str:
     Returns:
         message_text (str): Текст повідомлення.
     """
-    if config.get("iscorrectpunctuation", False): # Корекція пунктуації
+    if config.get("is_correct_punctuation", False): # Корекція пунктуації
         message_text = correct_punctuation(message_text)
-        print("[INFO] Корекція пунктуації.")
 
-    if config.get("istranslate", False): # Спеціальна обробка і переклад тексту
-        message_text = replace_whole_words(message_text, TRANSLATION_DICT).capitalize()
-        print("[INFO] Спеціальна обробка і переклад тексту.")
+    if config.get("is_translate", False): # Спеціальна обробка і переклад тексту
+        message_text = translate_text(message_text, TRANSLATION_DICT).capitalize()
     
-    if config.get("isdeletewords", False): # Видалення слів відповідно до переліку
-        for delete_word in config.get("deletewords", []):
+    if config.get("is_delete_words", False): # Видалення слів відповідно до переліку
+        for delete_word in config.get("delete_words", []):
             message_text = message_text.replace(delete_word, "")
         message_text = message_text.strip()
-        print("[INFO] Видалення слів відповідно до переліку.")
 
-    if config.get("istruncmessage", False) and len(message_text.split("\n")) > MAX_MESSAGE_ROWS: # Обрізання зайвої інформації
-        message_text = trunc_message(message_text, config.get("truncword", ""), CONTINUE_SYMBOLS)
-        print("[INFO] Обрізання зайвої інформації.")
+    if config.get("is_trunc_message", False) and len(message_text.split("\n")) > MAX_MESSAGE_ROWS: # Обрізання зайвої інформації
+        message_text = trunc_message(message_text, config.get("trunc_word", ""), CONTINUE_SYMBOLS)
 
     return message_text
 
 
+def format_other_reasons(message_stack, reason, max_message_rows, message_ttl, now):
+    """
+    Формує рядок з іншими причинами, відформатованими як цитати.
+    
+    Args:
+        message_stack (list): Список кортежів з часом і текстом повідомлень.
+        reason (str): Причина, яку потрібно виключити.
+        max_message_rows (int): Максимальна кількість рядків у повідомленні.
+        message_ttl (int): Час життя повідомлення в секундах.
+        now (datetime): Поточний час для порівняння.
+    
+    Returns:
+        str: Відформатований рядок з іншими причинами.
+    """
+    other_reasons = "\n \n".join(
+        f"<blockquote>{other_reason}</blockquote>"
+        for other_reason in [
+            m[1] for m in message_stack
+            if m[1] != reason 
+            and len(m[1].split("\n")) < 2 * max_message_rows 
+            and (now - m[0]).total_seconds() <= 2 * message_ttl
+        ]
+    )
+    return other_reasons
+
+
 def save_state(state_copy: dict) -> None:
-    state_copy["alarm_start_time"] = state_copy["alarm_start_time"].isoformat()
+    """
+    Зберігає поточний стан скрипта.
+    """
+    if "alarm_start_time" in state_copy and hasattr(state_copy["alarm_start_time"], 'isoformat'):
+        state_copy["alarm_start_time"] = state_copy["alarm_start_time"].isoformat()
+
+    if "message_stack" in state_copy:
+        for message in state_copy["message_stack"]:
+            if len(message) > 0 and hasattr(message[0], 'isoformat'):
+                message[0] = message[0].isoformat()
+
+    state_copy["message_stack"] = list(state_copy["message_stack"])
+    
     with open(STATE_JSON, "w", encoding="utf-8") as f:
         json.dump(state_copy, f, indent=4)
 
@@ -267,26 +299,23 @@ def exception_handler(func):
 @exception_handler
 async def handler(event):
 
-    global message_stack    # Перенести у state
-    global message_count    # Перенести у state
-
     message_text = event.raw_text
     channel_id = event.chat_id
 
     config = CHANNELS.get(channel_id, {})
 
     keywords = config.get("keywords", [])
-    trunc_word = config.get("truncword", "")
+    trunc_word = config.get("trunc_word", "")
     name = config.get("name", "невідомий")
     url = config.get("url", "")
-    is_filter_stopwords = config.get("isfilterstopwords", False) 
-    stop_length = config.get("stoplength", 0)
-    stopwords = config.get("stopwords", [])
-    is_silent = config.get("issilent", False)
-    is_save_for_alarm = config.get("issaveforalarm", False)
-    is_forward_images = config.get("isforwardimages", False)
-    is_trunc_message = config.get("istruncmessage", False)
-    is_alarm_source = config.get("isalarmsource", False)
+    is_filter_stop_words = config.get("is_filter_stop_words", False) 
+    stop_length = config.get("stop_length", 0)
+    stop_words = config.get("stop_words", [])
+    is_silent = config.get("is_silent", False)
+    is_save_for_alarm = config.get("is_save_for_alarm", False)
+    is_forward_images = config.get("is_forward_images", False)
+    is_alarm_source = config.get("is_alarm_source", False)
+    is_read_only_when_alarm = config.get("is_read_only_when_alarm", False)
 
     state = client.state
     now = datetime.now()
@@ -294,33 +323,29 @@ async def handler(event):
     messages_to_send = []
     is_save_right_now = False   # Прапорець, який каже що треба зберегти стан прямо зараз
 
-    print(f"\n[DEBUG] [{now.strftime('%H:%M:%S')}] Повідомлення з '{name}':\n{message_text or "[EMPTY]"}\n")
+    print(f"\n[DEBUG] [{now.strftime('%H:%M:%S')}] Повідомлення з '{name}':\n{message_text or "* EMPTY *"}\n")
 
     if not message_text and not is_forward_images:
         return
-    if config.get("is_read_only_when_alarm", False) and not state["is_alarm"]:
+    if is_read_only_when_alarm and not state["is_alarm"]:
         print("[INFO] Пропущене повідомлення з каналу, який відстежується тільки під час тривоги.")
         return
     
-    if is_save_for_alarm and not state["is_alarm"]: # Спеціальна обробка каналів-джерел інформації про тривогу
-        if is_trunc_message and trunc_word in message_text: # Якщо раптом повідомлення можна обрізати - то обрізаємо
-            message_text = trunc_message(message_text, trunc_word, CONTINUE_SYMBOLS)
-        message_stack.append([now, message_text]) # Зберігаємо текст і час
-        print(f"[INFO] Це повідомлення збережене у стек для наступної тривоги.")
+    if is_save_for_alarm and not state["is_alarm"] and len(message_text.split()) > 1: # Зберігаємо можливі причини тривоги в стек
+        state["message_stack"].append([now, process_text(message_text, config)]) # Зберігаємо текст і час
+        print(f"[DEBUG] Це повідомлення збережене у стек для наступної тривоги:\n>>>{process_text(message_text, config)}\n<<<")
 
-    if state["is_show_next_event"]: # Якщо треба обов'язково показати наступне повідомлення
+    if state["is_show_next_event"] and is_alarm_source: # Якщо треба обов'язково показати наступне повідомлення
         state["is_show_next_event"] = False
-        if is_trunc_message and trunc_word in message_text: # Якщо раптом повідомлення можна обрізати - то обрізаємо
-            message_text = trunc_message(message_text, trunc_word, CONTINUE_SYMBOLS)
+        message_text = trunc_message(message_text, trunc_word, CONTINUE_SYMBOLS)
         messages_to_send.append({"message_text": f"<i>Ймовірна причина тривоги:</i>\n{message_text}\n(<i>{url}</i>)", "silent": True})
-        state["current_channel"] = channel_id
 
     for keyword in keywords:
 
         if keyword.lower() in message_text.lower():
 
-            if is_filter_stopwords:
-                if len(message_text) > stop_length or any(stop_word in message_text for stop_word in stopwords):
+            if is_filter_stop_words:
+                if len(message_text) > stop_length or any(stop_word in message_text for stop_word in stop_words):
                     print(f"[DEBUG] Знайдено ключове слово '{keyword}', але повідомлення відфільтроване.")
                     break
 
@@ -333,20 +358,21 @@ async def handler(event):
             if is_alarm_source:
 
                 if keyword == ALARM_START_KEYWORD:
+                    message_text = message_text.replace("🚨", "🔴🔴🔴\n") # TODO зробити опцію для каналу, наприклад quick_replace
                     state["is_alarm"] = True
                     state["alarm_start_time"] = now
                     print(f"[DEBUG] Початок тривоги о {now.strftime('%H:%M:%S')}")
 
-                    reason = select_reason(message_stack, now)
+                    reason = select_reason(state["message_stack"], now)
                     if reason:
                         additional_message = f"\n<i>Ймовірна причина тривоги:\n{reason}</i>"
-                        # Винести наступний рядок у функцію
-                        other_reasons = "\n \n".join(f"<blockquote>{other_reason}</blockquote>" for other_reason in [m[1] for m in message_stack if m[1] != reason and len(m[1].split("\n")) < 2 * MAX_MESSAGE_ROWS and (now - m[0]).total_seconds() <= 2 * MESSAGE_TTL])
+                        other_reasons = format_other_reasons(state["message_stack"], reason, MAX_MESSAGE_ROWS, MESSAGE_TTL, now)
                     else:
                         state["is_show_next_event"] = True
                         additional_message = f"\n<i>Ймовірна причина тривоги не визначена.\nОчікуйте на причину в наступному повідомленні.</i>"
 
                 elif keyword == ALARM_END_KEYWORD:
+                    message_text = message_text.replace("🟢", "🟢🟢🟢\n")
                     state["is_alarm"] = False
                     hours, minutes = calculate_length_hm(now - state["alarm_start_time"])
                     additional_message = f"\n<i>Тривалість: {hours} г. {minutes} хв.</i>"
@@ -356,10 +382,7 @@ async def handler(event):
             # Кінець блоку опрацювання тривоги і відбою
 
             # Додаємо мітку каналу-джерела
-            if state["current_channel"] != channel_id:
-                message_text += f"\n<i>({url})</i>"
-                state["current_channel"] = channel_id
-            
+            message_text += f"\n<i>({url})</i>"      
 
             if not is_similar(message_text, state["last_message"]):
 
@@ -371,18 +394,19 @@ async def handler(event):
 
                 if other_reasons:
                     messages_to_send.append({"message_text": f"Інші можливі причини тривоги:\n{other_reasons}", "silent": True})
-                    print(f"[DEBUG] Інші можливі причини тривоги:\n{other_reasons}")
                 
             else:
                 print(f"[DEBUG] Повідомлення пропущене: '{message_text}' схоже на '{state["last_message"]}'.")
 
-            state["last_message"] = message_text # Зберігаємо текст останнього надісланого повідомлення для майбутньої перевірки
-
-            message_count += 1
-            if message_count >= 30 or is_save_right_now:
+            if not is_alarm_source:
+                state["last_message"] = message_text # Зберігаємо текст останнього надісланого повідомлення для майбутньої перевірки
+            state["message_count"] += 1
+            print(f"[DEBUG] message_count = {state["message_count"]}")
+            
+            if state["message_count"] >= 10 or is_save_right_now:
                 save_state(deepcopy(client.state))
                 is_save_right_now = False
-                message_count = 0
+                state["message_count"] = 0
 
             break # Зупиняє перебір ключових слів, якщо було хоч одне співпадіння
     else:
@@ -402,10 +426,5 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 
-# === notes ===
-# Server closed the connection: [WinError 121] The semaphore timeout period has expired
-# await client.pin_message(chat, message, notify=False)
-
-# quick replace
-# "🚨": "🔴🔴🔴",
-# "🟢": "🟢🟢🟢"
+# === notes/todo ===
+# TODO await client.pin_message(chat, message, notify=False)
