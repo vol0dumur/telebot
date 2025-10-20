@@ -1,39 +1,41 @@
 import asyncio
 import json
-import re # TODO from re import sub
+from os import getenv
+from dotenv import load_dotenv
+from re import sub, escape
 from copy import deepcopy
 from collections import deque
 from datetime import datetime
 from telethon import TelegramClient, events
-from secret import api_id, api_hash
 
 
 CHANNELS_JSON = "channels.json"
-STATE_JSON = "state.json"
-DICT_JSON = "dict.json"
 SETTINGS_JSON = "settings.json"
+STATE_JSON = "state.json"
+TRANSLATE_JSON = "translate.json"
 
-client = TelegramClient("user_session", api_id, api_hash)
+load_dotenv()
+client = TelegramClient("user_session", getenv("API_ID"), getenv("API_HASH"))
 client.parse_mode = "html"
 
 try:
     with open(CHANNELS_JSON, "r", encoding="utf-8") as f:
         CHANNELS = {int(k): v for k, v in json.load(f).items()}
-    with open(DICT_JSON, "r", encoding="utf-8") as f:
+    with open(SETTINGS_JSON, "r", encoding="utf-8") as f:
+        general_settings = json.load(f)
+    with open(TRANSLATE_JSON, "r", encoding="utf-8") as f:
         TRANSLATION_DICT = json.load(f)
     with open(STATE_JSON, "r", encoding="utf-8") as f:
         client.state = json.load(f)
-    with open(SETTINGS_JSON, "r", encoding="utf-8") as f:
-        general_settings = json.load(f)
 except FileNotFoundError:
-    print("[ERROR] Файл не знайдено.")
+    print("[ERROR] Файл json не знайдено.")
     raise
 except json.JSONDecodeError:
     print("[ERROR] Помилка формату json.")
     raise
 
 # Блок відновлення типу змінних після читання з json
-for key in ("alarm_start_time",):
+for key in ("alarm_start_time", "last_message_time"):
     if isinstance(client.state.get(key), str):
         client.state[key] = datetime.fromisoformat(client.state[key])
 
@@ -54,45 +56,45 @@ CONTINUE_SYMBOLS = general_settings["continue_symbols"]
 TARGET_CHANNEL_ID = general_settings["target_channel_id"]  # Канал призначення
 
 
-def correct_punctuation(raw_str: str) -> str:
+def correct_punctuation(text: str) -> str:
     """
     Виправляє пунктуацію в повідомленні.
     
     Args:
-        raw_str (str): Вхідний текст для обробки.
+        text (str): Вхідний текст для обробки.
     
     Returns:
-        str: Виправлений текст у нижньому регістрі.
+        str: Виправлений текст.
     """
-    if raw_str:
-        raw_str = re.sub(r"([.!?,;])", r"\1 ", raw_str)
-        raw_str = re.sub(r"\s+([.!?,;])", r"\1", raw_str)
-        raw_str = re.sub(r"\s+", " ", raw_str)
+    if text:
+        text = sub(r"([.!?,;])", r"\1 ", text)
+        text = sub(r"\s+([.!?,;])", r"\1", text)
+        text = sub(r"\s+", " ", text)
 
-    return raw_str.lower()
+    return text
 
 
-def trunc_message(raw_str: str, trunc_word: str, continue_symbols: set) -> str:
+def trunc_message(text: str, trunc_word: str, continue_symbols: set, max_message_rows = MAX_MESSAGE_ROWS) -> str:
     """
     Обрізає текст, починаючи з рядка, що містить trunc_word, і до рядка, 
     який не починається з символів із continue_symbols.
     
     Args:
-        raw_str (str): Вхідний текст для обробки.
+        text (str): Вхідний текст для обробки.
         trunc_word (str): Слово, з якого починається обрізка.
         continue_symbols (set): Набір символів, які дозволяють продовжувати обробку.
     
     Returns:
         str: Обрізаний текст, без завершальних пробілів.
     """
-    if not raw_str:
+    if not text:
         return ""
-    if not trunc_word or len(raw_str.split("\n")) <= MAX_MESSAGE_ROWS or trunc_word not in raw_str.lower():
-        return raw_str
+    if not trunc_word or len(text.split("\n")) <= max_message_rows or trunc_word not in text.lower():
+        return text
     
     result_lines = []
     is_processing = False
-    lines = raw_str.split("\n")
+    lines = text.split("\n")
     
     for line in lines:
         if is_processing:
@@ -118,8 +120,27 @@ def translate_text(text: str, translate_dict: dict) -> str:
     Returns:
         str: Перекладений текст.
     """
-    pattern = r'\b(' + '|'.join(re.escape(key) for key in translate_dict.keys()) + r')\b'
-    return re.sub(pattern, lambda m: translate_dict[m.group()], text.lower())
+    pattern = r'\b(' + '|'.join(escape(key) for key in translate_dict.keys()) + r')\b'
+    return sub(pattern, lambda m: translate_dict[m.group()], text.lower()).capitalize()
+
+
+def replace_text(text: str, replace_dict) -> str:
+    """
+    Замінює символи в повідомленні, використовуючи словник.
+    
+    Args:
+        text (str): Вхідний текст для обробки.
+        replace_dict (dict): Словник з парами слів/символів.
+    
+    Returns:
+        str: Опрацьований текст.
+    """
+    if replace_dict:
+        for key, value in replace_dict.items():
+            if key in text:
+                text = text.replace(key, value)
+    
+    return text
 
 
 def calculate_length_hm(diff: datetime) -> tuple:
@@ -136,49 +157,61 @@ def calculate_length_hm(diff: datetime) -> tuple:
     return total_secs // 3600, (total_secs % 3600) // 60
     
 
-def make_set(message: str) -> set:
+def make_set(message: str, region_list=general_settings.get("region", [])) -> set:
     """
-    Перетворює рядок на множину.
+    Перетворює рядок на множину, використовуючи заданий масив назв населених пунктів.
     
     Args:
         message (str): Повідомлення.
     
     Returns:
-        set: Повертає множину з унікальними словами.
+        set: Множина з унікальними словами - назвами населених пунктів.
     """
-    return set([word.lower().strip()[:9] for word in message.split()])
+    return {locality for locality in region_list if locality in message.lower()}
 
 
-def is_similar(message1: str, message2: str) -> bool:
+def is_similar(message1: str, message2: str, last_message_time:datetime, message_ttl=MESSAGE_TTL) -> bool:
     """
     Порівнює два повідомлення.
     
     Args:
         message1 (str): Повідомлення 1.
         message1 (str): Повідомлення 2.
+        last_message_time (datetime): Час старішого повідомлення.
     
     Returns:
-        bool: Повертає True, якщо співпало 50% слів чи більше.
+        bool: Повертає True, якщо співпало 70% слів чи більше.
     """
+    if (datetime.now() - last_message_time).total_seconds() > 2 * message_ttl:
+        print("[DEBUG] Попереднє повідомлення старе, тому перевірка на схожість далі не здійснюється.")
+        return False
+    
+    print(f"[DEBUG] Порівнюємо 2 повідомлення:\n1) >>> {message1}\n2) >>> {message2}")
     set1 = make_set(message1)
+    print(f"[DEBUG] Set 1:\n{set1}")
     set2 = make_set(message2)
-    match_rate = len(set1.intersection(set2)) / max(len(set1), len(set2))
+    print(f"[DEBUG] Set 2:\n{set2}")
+    if not set1 or not set2:
+        print("Якийсь з set пустий. Зупиняємо порівняння!")
+        return False
+    
+    match_rate = len(set1.intersection(set2)) / max(len(set1), len(set2)) # ділення на 0!
 
-    return match_rate >= 0.5
+    return match_rate >= 0.7
 
 
-def select_reason(message_stack: deque, base_time: datetime, message_ttl=MESSAGE_TTL) -> str:
+def select_reason(message_stack: deque, time_now: datetime, message_ttl=MESSAGE_TTL) -> str:
     """
     Обирає найкоротшу причину зі стеку повідомлень.
     
     Args:
         message_stack (deque): Стек повідомлень.
-        base_time (str): Час, від .
+        time_now (str): Поточний час.
     
     Returns:
         str: Повертає найкоротше повідомлення.
     """
-    valid_reasons = [m[1] for m in message_stack if (base_time - m[0]).total_seconds() <= message_ttl]
+    valid_reasons = [m[1] for m in message_stack if (time_now - m[0]).total_seconds() <= message_ttl]
     return min(valid_reasons, key=len, default="")
 
 
@@ -224,7 +257,7 @@ def process_text(message_text: str, config: dict) -> str:
         message_text = correct_punctuation(message_text)
 
     if config.get("is_translate", False): # Спеціальна обробка і переклад тексту
-        message_text = translate_text(message_text, TRANSLATION_DICT).capitalize()
+        message_text = translate_text(message_text, TRANSLATION_DICT)
     
     if config.get("is_delete_words", False): # Видалення слів відповідно до переліку
         for delete_word in config.get("delete_words", []):
@@ -237,7 +270,7 @@ def process_text(message_text: str, config: dict) -> str:
     return message_text
 
 
-def format_other_reasons(message_stack, reason, max_message_rows, message_ttl, now):
+def format_other_reasons(message_stack, reason, now, max_message_rows=MAX_MESSAGE_ROWS, message_ttl=MESSAGE_TTL):
     """
     Формує рядок з іншими причинами, відформатованими як цитати.
     
@@ -266,13 +299,20 @@ def format_other_reasons(message_stack, reason, max_message_rows, message_ttl, n
 def save_state(state_copy: dict) -> None:
     """
     Зберігає поточний стан скрипта.
+
+    Args:
+        state_copy (dict): Копія стану скрипта.
+    
+    Returns:
+        None.
     """
-    if "alarm_start_time" in state_copy and hasattr(state_copy["alarm_start_time"], 'isoformat'):
-        state_copy["alarm_start_time"] = state_copy["alarm_start_time"].isoformat()
+    for key in ("alarm_start_time", "last_message_time"):
+        if hasattr(state_copy[key], "isoformat"):
+            state_copy[key] = state_copy[key].isoformat()
 
     if "message_stack" in state_copy:
         for message in state_copy["message_stack"]:
-            if len(message) > 0 and hasattr(message[0], 'isoformat'):
+            if len(message) > 0 and hasattr(message[0], "isoformat"):
                 message[0] = message[0].isoformat()
 
     state_copy["message_stack"] = list(state_copy["message_stack"])
@@ -333,16 +373,16 @@ async def handler(event):
     
     if is_save_for_alarm and not state["is_alarm"] and len(message_text.split()) > 1: # Зберігаємо можливі причини тривоги в стек
         state["message_stack"].append([now, process_text(message_text, config)]) # Зберігаємо текст і час
-        print(f"[DEBUG] Це повідомлення збережене у стек для наступної тривоги:\n>>>{process_text(message_text, config)}\n<<<")
 
     if state["is_show_next_event"] and is_alarm_source: # Якщо треба обов'язково показати наступне повідомлення
         state["is_show_next_event"] = False
-        message_text = trunc_message(message_text, trunc_word, CONTINUE_SYMBOLS)
-        messages_to_send.append({"message_text": f"<i>Ймовірна причина тривоги:</i>\n{message_text}\n(<i>{url}</i>)", "silent": True})
+        if (now - state["alarm_start_time"]).total_seconds() < MESSAGE_TTL:
+            message_text = trunc_message(message_text, trunc_word, CONTINUE_SYMBOLS)
+            messages_to_send.append({"message_text": f"<i>Ймовірна причина тривоги:</i>\n{message_text}\n(<i>{url}</i>)", "silent": True})
 
     for keyword in keywords:
 
-        if keyword.lower() in message_text.lower():
+        if keyword in message_text.lower():
 
             if is_filter_stop_words:
                 if len(message_text) > stop_length or any(stop_word in message_text for stop_word in stop_words):
@@ -358,21 +398,21 @@ async def handler(event):
             if is_alarm_source:
 
                 if keyword == ALARM_START_KEYWORD:
-                    message_text = message_text.replace("🚨", "🔴🔴🔴\n") # TODO зробити опцію для каналу, наприклад quick_replace
+                    message_text = replace_text(message_text, config.get("replace_words", {}))
                     state["is_alarm"] = True
                     state["alarm_start_time"] = now
-                    print(f"[DEBUG] Початок тривоги о {now.strftime('%H:%M:%S')}")
+                    # print(f"[DEBUG] Початок тривоги о {now.strftime('%H:%M:%S')}")
 
                     reason = select_reason(state["message_stack"], now)
                     if reason:
                         additional_message = f"\n<i>Ймовірна причина тривоги:\n{reason}</i>"
-                        other_reasons = format_other_reasons(state["message_stack"], reason, MAX_MESSAGE_ROWS, MESSAGE_TTL, now)
+                        other_reasons = format_other_reasons(state["message_stack"], reason, now)
                     else:
                         state["is_show_next_event"] = True
-                        additional_message = f"\n<i>Ймовірна причина тривоги не визначена.\nОчікуйте на причину в наступному повідомленні.</i>"
+                        additional_message = f"\n<i>Ймовірна причина тривоги не визначена.\nОчікуйте на причину в наступних повідомленнях.</i>"
 
                 elif keyword == ALARM_END_KEYWORD:
-                    message_text = message_text.replace("🟢", "🟢🟢🟢\n")
+                    message_text = replace_text(message_text, config.get("replace_words", {}))
                     state["is_alarm"] = False
                     hours, minutes = calculate_length_hm(now - state["alarm_start_time"])
                     additional_message = f"\n<i>Тривалість: {hours} г. {minutes} хв.</i>"
@@ -384,7 +424,7 @@ async def handler(event):
             # Додаємо мітку каналу-джерела
             message_text += f"\n<i>({url})</i>"      
 
-            if not is_similar(message_text, state["last_message"]):
+            if not is_similar(message_text, state["last_message"], state["last_message_time"]):
 
                 if is_forward_images and event.photo:
                     messages_to_send.append({"file": event.photo, "message_text": f"{message_text}{additional_message}", "silent": is_silent})
@@ -393,13 +433,14 @@ async def handler(event):
                 print(f"[DEBUG] Знайдено ключове слово '{keyword}' — повідомлення надіслане.")
 
                 if other_reasons:
-                    messages_to_send.append({"message_text": f"Інші можливі причини тривоги:\n{other_reasons}", "silent": True})
+                    messages_to_send.append({"message_text": f"Інші можливі причини тривоги:\n{other_reasons}", "silent": True})   
                 
             else:
                 print(f"[DEBUG] Повідомлення пропущене: '{message_text}' схоже на '{state["last_message"]}'.")
 
             if not is_alarm_source:
                 state["last_message"] = message_text # Зберігаємо текст останнього надісланого повідомлення для майбутньої перевірки
+                state["last_message_time"] = now
             state["message_count"] += 1
             print(f"[DEBUG] message_count = {state["message_count"]}")
             
