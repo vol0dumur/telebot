@@ -36,6 +36,7 @@ except json.JSONDecodeError:
 
 # Блок відновлення типу змінних після читання з json
 for key in ("alarm_start_time", "last_message_time"):
+# for key in ("last_message_time"):
     if isinstance(client.state.get(key), str):
         client.state[key] = datetime.fromisoformat(client.state[key])
 
@@ -53,7 +54,12 @@ MESSAGE_TTL = general_settings["message_ttl"]
 ALARM_START_KEYWORD = general_settings["alarm_start_keyword"]
 ALARM_END_KEYWORD = general_settings["alarm_end_keyword"]
 CONTINUE_SYMBOLS = general_settings["continue_symbols"]
+REGION_LIST = general_settings["region"]
 TARGET_CHANNEL_ID = general_settings["target_channel_id"]  # Канал призначення
+ALARM_CHANNEL_ID = general_settings["alarm_channel_id"]
+
+# client.state["is_alarm"] = ""
+# client.state["alarm_start_time"] = ""
 
 
 def correct_punctuation(text: str) -> str:
@@ -157,7 +163,7 @@ def calculate_length_hm(diff: datetime) -> tuple:
     return total_secs // 3600, (total_secs % 3600) // 60
     
 
-def make_set(message: str, region_list=general_settings.get("region", [])) -> set:
+def make_set(message: str, region_list=REGION_LIST) -> set:
     """
     Перетворює рядок на множину, використовуючи заданий масив назв населених пунктів.
     
@@ -183,7 +189,7 @@ def is_similar(message1: str, message2: str, last_message_time:datetime, message
         bool: Повертає True, якщо співпало 70% слів чи більше.
     """
     if (datetime.now() - last_message_time).total_seconds() > 2 * message_ttl:
-        print("[DEBUG] Попереднє повідомлення старе, тому перевірка на схожість далі не здійснюється.")
+        # print("[DEBUG] Попереднє повідомлення старе, тому перевірка на схожість далі не здійснюється.")
         return False
     
     print(f"[DEBUG] Порівнюємо 2 повідомлення:\n1) >>> {message1}\n2) >>> {message2}")
@@ -195,7 +201,7 @@ def is_similar(message1: str, message2: str, last_message_time:datetime, message
         print("Якийсь з set пустий. Зупиняємо порівняння!")
         return False
     
-    match_rate = len(set1.intersection(set2)) / max(len(set1), len(set2)) # ділення на 0!
+    match_rate = len(set1.intersection(set2)) / max(len(set1), len(set2))
 
     return match_rate >= 0.7
 
@@ -220,7 +226,7 @@ async def send_messages(messages_to_send: list) -> None:
     Надсилає повідомлення відповідно до отриманого списку.
     
     Args:
-        messages_to_send (list): Список словників з даними повідомлення.
+        messages_to_send (list): Список словників з даними повідомлень.
     
     Returns:
         None.
@@ -319,6 +325,34 @@ def save_state(state_copy: dict) -> None:
     
     with open(STATE_JSON, "w", encoding="utf-8") as f:
         json.dump(state_copy, f, indent=4)
+
+
+async def load_alarm_state_from_channel():
+    """
+    Завантажує статус тривога/відбій з відповідного каналу.
+
+    Args:
+        None.
+    
+    Returns:
+        None.
+    """
+    try:
+        last_msg = await client.get_messages(ALARM_CHANNEL_ID, limit=1)
+        if last_msg and last_msg[0] and last_msg[0].raw_text:
+            msg_text = last_msg[0].raw_text.lower()
+            msg_time = last_msg[0].date.replace(tzinfo=None)
+
+            client.state["is_alarm"] = ALARM_START_KEYWORD in msg_text
+            client.state["alarm_start_time"] = msg_time
+
+            print(f"[INFO] Поточний статус: {'ТРИВОГА' if client.state['is_alarm'] else 'ВІДБІЙ'} "
+                f"(з {msg_time.strftime('%H:%M:%S')})")
+        else:
+            print("[WARN] Канал не містить текстових повідомлень для перевірки.")
+
+    except Exception as e:
+        print(f"[ERROR] Не вдалося отримати останнє повідомлення з каналу тривоги: {e}")
 
 
 def exception_handler(func):
@@ -422,7 +456,21 @@ async def handler(event):
             # Кінець блоку опрацювання тривоги і відбою
 
             # Додаємо мітку каналу-джерела
-            message_text += f"\n<i>({url})</i>"      
+            message_text += f"\n<i>({url})</i>"
+
+            # Перевіряємо, чи є це цитата
+            if event.is_reply and event.reply_to:
+                # Отримуємо цитоване повідомлення
+                quoted_message = await event.get_reply_message()
+                
+                if quoted_message:
+                    quoted_text = process_text(quoted_message.raw_text, config)
+                    message_text = f"<blockquote>{quoted_text}</blockquote>\n{message_text}"
+                    print(f"[INFO] Цитоване повідомлення: {quoted_text}")
+                else:
+                    print("[INFO] Цитоване повідомлення недоступне (можливо, видалене)")
+            else:
+                print("[INFO] Це не цитата")
 
             if not is_similar(message_text, state["last_message"], state["last_message_time"]):
 
@@ -460,6 +508,10 @@ async def handler(event):
 async def main():
     await client.start()
     print(f"[DEBUG] [{datetime.now().strftime('%H:%M:%S')}] Бот запущений.")
+
+    # Зчитування останнього повідомлення з каналу тривог
+    await load_alarm_state_from_channel()
+
     await client.run_until_disconnected()
 
 

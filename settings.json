@@ -1,5 +1,6 @@
 {
     "target_channel_id": -1002780261518,
+    "alarm_channel_id": -1002363248816,
     "alarm_start_keyword": "тривога",
     "alarm_end_keyword": "відбій",
     "message_ttl": 420,
