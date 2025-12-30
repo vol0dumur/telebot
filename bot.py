@@ -6,6 +6,7 @@ from re import sub, escape
 from copy import deepcopy
 from collections import deque
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from telethon import TelegramClient, events
 
 
@@ -341,13 +342,18 @@ async def load_alarm_state_from_channel():
         last_msg = await client.get_messages(ALARM_CHANNEL_ID, limit=1)
         if last_msg and last_msg[0] and last_msg[0].raw_text:
             msg_text = last_msg[0].raw_text.lower()
-            msg_time = last_msg[0].date.replace(tzinfo=None)
+
+            # Час з повідомлення у локальний (Київ)
+            msg_time_utc = last_msg[0].date
+            msg_time = msg_time_utc.astimezone(ZoneInfo("Europe/Kyiv")).replace(tzinfo=None)
 
             client.state["is_alarm"] = ALARM_START_KEYWORD in msg_text
             client.state["alarm_start_time"] = msg_time
 
-            print(f"[INFO] Поточний статус: {'ТРИВОГА' if client.state['is_alarm'] else 'ВІДБІЙ'} "
-                f"(з {msg_time.strftime('%H:%M:%S')})")
+            print(
+                f"[INFO] Поточний статус: {'ТРИВОГА' if client.state['is_alarm'] else 'ВІДБІЙ'} "
+                f"(з {msg_time.strftime('%H:%M:%S')})"
+            )
         else:
             print("[WARN] Канал не містить текстових повідомлень для перевірки.")
 
