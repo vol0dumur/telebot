@@ -1,6 +1,7 @@
 import asyncio
 import json
-from os import getenv
+import logging
+from os import getenv, path, makedirs
 from dotenv import load_dotenv
 from re import sub, escape
 from copy import deepcopy
@@ -8,6 +9,7 @@ from collections import deque
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from telethon import TelegramClient, events
+from logging.handlers import TimedRotatingFileHandler
 
 
 CHANNELS_JSON = "channels.json"
@@ -15,9 +17,37 @@ SETTINGS_JSON = "settings.json"
 STATE_JSON = "state.json"
 TRANSLATE_JSON = "translate.json"
 
+
+class DailyFileHandler(TimedRotatingFileHandler):
+    """Обробник логів, який щодня створює новий файл виду log_yyyy-mm-dd.log"""
+
+    def __init__(self, log_dir="logs"):
+        self.log_dir = log_dir
+        makedirs(self.log_dir, exist_ok=True)
+        super().__init__(self._build_filename(), when="midnight", interval=1, encoding="utf-8")
+
+    def _build_filename(self):
+        return path.join(self.log_dir, f"log_{datetime.now().strftime('%Y-%m-%d')}.log")
+
+    def doRollover(self):
+        if self.stream:
+            self.stream.close()
+        self.baseFilename = self._build_filename()
+        self.stream = self._open()
+
+
 load_dotenv()
 client = TelegramClient("user_session", getenv("API_ID"), getenv("API_HASH"))
 client.parse_mode = "html"
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[DailyFileHandler()],
+)
+
+logger = logging.getLogger(__name__)
 
 try:
     with open(CHANNELS_JSON, "r", encoding="utf-8") as f:
@@ -29,10 +59,10 @@ try:
     with open(STATE_JSON, "r", encoding="utf-8") as f:
         client.state = json.load(f)
 except FileNotFoundError:
-    print("[ERROR] Файл json не знайдено.")
+    logger.error("Файл json не знайдено.")
     raise
 except json.JSONDecodeError:
-    print("[ERROR] Помилка формату json.")
+    logger.error("Помилка формату json.")
     raise
 
 # Блок відновлення типу змінних після читання з json
@@ -57,6 +87,7 @@ ALARM_END_KEYWORD = general_settings["alarm_end_keyword"]
 CONTINUE_SYMBOLS = general_settings["continue_symbols"]
 REGION_LIST = general_settings["region"]
 NOT_A_REASON_LIST = general_settings["not_a_reason"]
+MAX_REASON_LENGTH = general_settings["max_reason_length"]
 TARGET_CHANNEL_ID = general_settings["target_channel_id"]  # Канал призначення
 ALARM_CHANNEL_ID = general_settings["alarm_channel_id"]
 
@@ -197,16 +228,16 @@ def is_similar(message1: str, message2: str, last_message_time: datetime, messag
         bool: Повертає True, якщо співпало 70% слів чи більше.
     """
     if (datetime.now() - last_message_time).total_seconds() > 2 * message_ttl:
-        # print("[DEBUG] Попереднє повідомлення старе, тому перевірка на схожість далі не здійснюється.")
+        # logger.debug("Попереднє повідомлення старе, тому перевірка на схожість далі не здійснюється.")
         return False
 
-    print(f"[DEBUG] Порівнюємо 2 повідомлення:\n1) >>> {message1}\n2) >>> {message2}")
+    logger.debug(f"Порівнюємо 2 повідомлення:\n1) >>> {message1}\n2) >>> {message2}")
     set1 = make_set(message1)
-    print(f"[DEBUG] Set 1:\n{set1}")
+    logger.debug(f"Set 1:\n{set1}")
     set2 = make_set(message2)
-    print(f"[DEBUG] Set 2:\n{set2}")
+    logger.debug(f"Set 2:\n{set2}")
     if not set1 or not set2:
-        print("Якийсь з set пустий. Зупиняємо порівняння!")
+        logger.debug("Якийсь з set пустий. Зупиняємо порівняння!")
         return False
 
     match_rate = len(set1.intersection(set2)) / max(len(set1), len(set2))
@@ -259,9 +290,9 @@ async def send_messages(messages_to_send: list) -> None:
                 await client.send_message(
                     target_channel_id, message_text, silent=silent
                 )
-            print(f"[DEBUG] Було надіслане повідомлення:\n>>> {message_text} <<<")
+            logger.debug(f"Було надіслане повідомлення:\n>>> {message_text} <<<")
         except Exception as e:
-            print(f"[ERROR] Помилка відправки: {e}")
+            logger.error(f"Помилка надсилання: {e}")
 
 
 def process_text(message_text: str, config: dict) -> str:
@@ -383,11 +414,15 @@ async def load_alarm_state_from_channel():
                 f"[INFO] Поточний статус: {'ТРИВОГА' if client.state['is_alarm'] else 'ВІДБІЙ'} "
                 f"(з {msg_time.strftime('%H:%M:%S')})"
             )
+            logger.info(
+                f"[INFO] Поточний статус: {'ТРИВОГА' if client.state['is_alarm'] else 'ВІДБІЙ'} "
+                f"(з {msg_time.strftime('%H:%M:%S')})"
+            )
         else:
-            print("[WARN] Канал не містить текстових повідомлень для перевірки.")
+            logger.warning("Канал не містить текстових повідомлень для перевірки.")
 
     except Exception as e:
-        print(f"[ERROR] Не вдалося отримати останнє повідомлення з каналу тривоги: {e}")
+        logger.error(f"Не вдалося отримати останнє повідомлення з каналу тривоги: {e}")
 
 
 def exception_handler(func):
@@ -400,7 +435,7 @@ def exception_handler(func):
             if hasattr(event, "chat_id") and event.chat_id in CHANNELS:
                 channel_name = CHANNELS[event.chat_id].get("name", "невідомий канал")
 
-            print(f"[ERROR] [{datetime.now().strftime('%H:%M:%S')}] Помилка в обробці повідомлення з '{channel_name}': {e}")
+            logger.error(f"[{datetime.now().strftime('%H:%M:%S')}] Помилка в обробці повідомлення з '{channel_name}': {e}")
 
     return wrapper
 
@@ -433,16 +468,16 @@ async def handler(event):
     messages_to_send = []
     is_save_right_now = False  # Прапорець, який каже що треба зберегти стан прямо зараз
 
-    print(f"\n[DEBUG] [{now.strftime('%H:%M:%S')}] Повідомлення з '{name}':\n{message_text or "* EMPTY *"}\n")
+    logger.debug(f"\n[{now.strftime('%H:%M:%S')}] Повідомлення з '{name}':\n{message_text or "* EMPTY *"}\n")
 
     if not message_text and not is_forward_images:
         return
     if is_read_only_when_alarm and not state["is_alarm"]:
-        print("[INFO] Пропущене повідомлення з каналу, який відстежується тільки під час тривоги.")
+        logger.info("Пропущене повідомлення з каналу, який відстежується тільки під час тривоги.")
         return
 
     # Зберігаємо можливі причини тривоги в стек
-    if (is_save_for_alarm and not state["is_alarm"] and len(message_text.split()) > 1 and not any(not_a_reason in message_text.lower() for not_a_reason in NOT_A_REASON_LIST)):
+    if (is_save_for_alarm and not state["is_alarm"] and len(message_text) <= MAX_REASON_LENGTH and len(message_text.split()) > 1 and not any(not_a_reason in message_text.lower() for not_a_reason in NOT_A_REASON_LIST)):
         state["message_stack"].append([now, process_text(message_text, config)])  # Зберігаємо текст і час
 
     if (state["is_show_next_event"] and is_alarm_source): # Якщо треба обов'язково показати наступне повідомлення
@@ -456,14 +491,15 @@ async def handler(event):
         if keyword in message_text.lower():
 
             if is_filter_stop_words:
-                if len(message_text) > stop_length or any(stop_word in message_text for stop_word in stop_words):
-                    print(f"[DEBUG] Знайдено ключове слово '{keyword}', але повідомлення відфільтроване по стоп-слову.")
+                if len(message_text) > stop_length or any(stop_word in message_text.lower() for stop_word in stop_words):
+                    logger.debug(f"Знайдено ключове слово '{keyword}', але повідомлення відфільтроване по стоп-слову.")
                     break
 
             # Обробка тексту
             message_text = process_text(message_text, config)
 
             additional_message = ""
+            file = event.photo
 
             # Блок опрацювання тривоги і відбою. Винести у функцію
             if is_alarm_source:
@@ -472,7 +508,7 @@ async def handler(event):
                     message_text = replace_text(message_text, config.get("replace_words", {}))
                     state["is_alarm"] = True
                     state["alarm_start_time"] = now
-                    # print(f"[DEBUG] Початок тривоги о {now.strftime('%H:%M:%S')}")
+                    # logger.debug(f"Початок тривоги о {now.strftime('%H:%M:%S')}")
 
                     reason = select_reason(state["message_stack"], now)
                     if reason:
@@ -505,20 +541,26 @@ async def handler(event):
                     message_text = (
                         f"<blockquote>{quoted_text}</blockquote>\n{message_text}"
                     )
-                    print(f"[INFO] Цитоване повідомлення: {quoted_text}")
+                    logger.info(f"Цитоване повідомлення: {quoted_text}")
+
+                    # Якщо в цитаті є зображення і власного файлу ще немає - додаємо його
+                    if quoted_message.photo and not file:
+                        file = quoted_message.photo
+                        message_text += "\n<i>Прикріплене зображення узяте з цитати.</i>"
+                        logger.info("У цитаті знайдено зображення - буде додано до повідомлення")
                 else:
-                    print("[INFO] Цитоване повідомлення недоступне (можливо, видалене)")
+                    logger.info("Цитоване повідомлення недоступне (можливо, видалене)")
             else:
-                print("[INFO] Це не цитата")
+                logger.info("Це не цитата")
 
             if not is_similar(
                 message_text, state["last_message"], state["last_message_time"]
             ):
 
-                if is_forward_images and event.photo:
+                if is_forward_images and file:
                     messages_to_send.append(
                         {
-                            "file": event.photo,
+                            "file": file,
                             "message_text": f"{message_text}{additional_message}",
                             "silent": is_silent,
                         }
@@ -530,8 +572,8 @@ async def handler(event):
                             "silent": is_silent,
                         }
                     )
-                print(
-                    f"[DEBUG] Знайдено ключове слово '{keyword}' — повідомлення надіслане."
+                logger.debug(
+                    f"Знайдено ключове слово '{keyword}' — повідомлення надіслане."
                 )
 
                 if other_reasons:
@@ -543,9 +585,7 @@ async def handler(event):
                     )
 
             else:
-                print(
-                    f"[DEBUG] Повідомлення пропущене: '{message_text}' схоже на '{state["last_message"]}'."
-                )
+                logger.debug(f"Повідомлення пропущене: '{message_text}' схоже на '{state["last_message"]}'.")
 
             if not is_alarm_source:
                 state["last_message"] = (
@@ -553,7 +593,7 @@ async def handler(event):
                 )
                 state["last_message_time"] = now
             state["message_count"] += 1
-            print(f"[DEBUG] message_count = {state["message_count"]}")
+            logger.debug(f"message_count = {state["message_count"]}")
 
             if state["message_count"] >= 10 or is_save_right_now:
                 save_state(deepcopy(client.state))
@@ -562,7 +602,7 @@ async def handler(event):
 
             break  # Зупиняє перебір ключових слів, якщо було хоч одне співпадіння
     else:
-        print(f"[INFO] Ключових слів не знайдено.")
+        logger.info(f"Ключових слів не знайдено.")
 
     if messages_to_send:
         await send_messages(messages_to_send)
@@ -570,7 +610,8 @@ async def handler(event):
 
 async def main():
     await client.start()
-    print(f"[DEBUG] [{datetime.now().strftime('%H:%M:%S')}] Бот запущений.")
+    print(f"[INFO] [{datetime.now().strftime('%H:%M:%S')}] Бот запущений.")
+    logger.info(f"[{datetime.now().strftime('%H:%M:%S')}] Бот запущений.")
 
     # Зчитування останнього повідомлення з каналу тривог
     await load_alarm_state_from_channel()
